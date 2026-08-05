@@ -1,5 +1,1 @@
-```
-# Directories
-repo/
-repo_temp/
-```
+Nothing should be ignored based on the provided file changes. The added file `LifeManagementScript.gs` appears to be a source code file that should be tracked, and the modified files `repo` and `repo_temp` don't indicate any build artifacts or temporary files that need to be ignored.
