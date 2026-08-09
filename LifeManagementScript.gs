@@ -747,6 +747,21 @@ function onEdit(e) {
 
     Logger.log("[ONEDIT] " + sheetName + " R" + row + "C" + col + " = " + e.value);
 
+    // Automatically add today's date in 'Date Added' column of edited row for new tasks
+    if (sheetName === DAILY_LOG_SHEET_NAME || sheetName === MASTER_PROJECT_TRACKER_SHEET_NAME) {
+      const cols = getColumnMap(sheet);
+      if (cols["Task"] !== undefined && col === cols["Task"] + 1) {
+        const taskVal = sheet.getRange(row, col).getValue();
+        const dateAddedCol = cols["Date Added"];
+        if (taskVal && dateAddedCol !== undefined) {
+          const dateAddedCell = sheet.getRange(row, dateAddedCol + 1);
+          if (!dateAddedCell.getValue()) {
+            dateAddedCell.setValue(new Date()).setNumberFormat("yyyy-MM-dd");
+          }
+        }
+      }
+    }
+
     // Update goal progress when Master status changes
     if (sheetName === MASTER_PROJECT_TRACKER_SHEET_NAME) {
       const cols = getColumnMap(sheet);
@@ -819,7 +834,7 @@ function calculateGoalHierarchyProgress(ss) {
   const mData = getSheetDataSafe(master);
   const gData = getSheetDataSafe(goals);
 
-  // Map out tasks grouped by Goal Name
+  // Map out tasks grouped by Goal Name from Master Project Tracker
   const taskGoalMap = {};
   mData.forEach(function(row) {
     const goalName = String(row[mCols["Goal Name"]] || "").trim();
@@ -828,32 +843,28 @@ function calculateGoalHierarchyProgress(ss) {
       taskGoalMap[goalName] = { total: 0, done: 0 };
     }
     taskGoalMap[goalName].total++;
-    if (String(row[mCols["Status"]] || "").trim() === "✅ Done") taskGoalMap[goalName].done++;
+    const status = String(row[mCols["Status"]] || "").trim();
+    if (status === "✅ Done" || status === "Done") taskGoalMap[goalName].done++;
   });
 
   const goalProgressTracker = {};
 
-  // Initialize tracker with current goal values from existing rows
-  gData.forEach(function(row, idx) {
+  // Step 1: Calculate direct task-based progress for any existing goal in Goals & Habits
+  // if there are associated tasks in the Master Project Tracker.
+  // If there are no tasks, initialize with its current Progress value.
+  gData.forEach(function(row) {
     const goalName = String(row[gCols["Goal Name"]] || "").trim();
     if (!goalName) return;
-    const level = String(row[gCols["Goal Level"]] || "").trim();
 
-    // For Weekly goals, calculate from master tasks if tasks exist
-    if (level === "Weekly Goal") {
-      if (taskGoalMap[goalName]) {
-        const entry = taskGoalMap[goalName];
-        goalProgressTracker[goalName] = entry.total > 0 ? entry.done / entry.total : 0;
-      } else {
-        goalProgressTracker[goalName] = Number(row[gCols["Progress"]]) || 0;
-      }
+    if (taskGoalMap[goalName]) {
+      const entry = taskGoalMap[goalName];
+      goalProgressTracker[goalName] = entry.total > 0 ? entry.done / entry.total : 0;
     } else {
       goalProgressTracker[goalName] = Number(row[gCols["Progress"]]) || 0;
     }
   });
 
-  // Calculate cascading progress:
-  // 1. Identify relationships: Parent Goal -> Child Goals
+  // Step 2: Build parent-to-children relationship mappings of existing goals
   const parentToChildren = {};
   gData.forEach(function(row) {
     const goalName = String(row[gCols["Goal Name"]] || "").trim();
@@ -864,31 +875,34 @@ function calculateGoalHierarchyProgress(ss) {
     }
   });
 
-  // 2. Cascade progress upwards: iterate 3 times to cover Weekly -> Monthly -> Overall / Weekly -> Overall
+  // Step 3: Cascade progress upwards for parent goals that do NOT have direct tasks in Master Tracker
+  // (If a parent goal has direct tasks associated with it, we let the direct task-based calculation take precedence)
   for (let iter = 0; iter < 3; iter++) {
     gData.forEach(function(row) {
       const goalName = String(row[gCols["Goal Name"]] || "").trim();
-      const level = String(row[gCols["Goal Level"]] || "").trim();
-      if (!goalName || level === "Weekly Goal") return; // Weekly Goals are based on master tasks
+      if (!goalName) return;
 
-      const children = parentToChildren[goalName] || [];
-      if (children.length > 0) {
-        let sum = 0;
-        let validCount = 0;
-        children.forEach(function(childName) {
-          if (goalProgressTracker[childName] !== undefined) {
-            sum += goalProgressTracker[childName];
-            validCount++;
+      // Only cascade if this goal does NOT have direct tasks in the Master Project Tracker
+      if (!taskGoalMap[goalName]) {
+        const children = parentToChildren[goalName] || [];
+        if (children.length > 0) {
+          let sum = 0;
+          let validCount = 0;
+          children.forEach(function(childName) {
+            if (goalProgressTracker[childName] !== undefined) {
+              sum += goalProgressTracker[childName];
+              validCount++;
+            }
+          });
+          if (validCount > 0) {
+            goalProgressTracker[goalName] = sum / validCount;
           }
-        });
-        if (validCount > 0) {
-          goalProgressTracker[goalName] = sum / validCount;
         }
       }
     });
   }
 
-  // 3. Write calculated progress back to the Goals sheet
+  // Step 4: Write calculated progress back to the Goals & Habits sheet
   gData.forEach(function(row, idx) {
     const goalName = String(row[gCols["Goal Name"]] || "").trim();
     if (goalName && goalProgressTracker[goalName] !== undefined) {
@@ -896,7 +910,7 @@ function calculateGoalHierarchyProgress(ss) {
     }
   });
 
-  Logger.log("[GOALS] Cascade complete.");
+  Logger.log("[GOALS] Goals progress recalculation complete.");
 }
 
 // ======================== HABIT TRACKER ========================
@@ -1138,7 +1152,7 @@ function syncDailyLogToMaster(dailyLog, master, dCols, mCols) {
       setM("Fun",                fun);
       setM("Pomodoros 🍅",       pomodoros);
       setM("Time Logged (mins)", timeLogged);
-      setM("Date Added",         new Date());
+      setM("Date Added",         getD("Date Added") || new Date());
 
       master.appendRow(newRow);
 
@@ -1217,7 +1231,7 @@ function syncMasterToDailyLog(dailyLog, master, dCols, mCols, tz) {
       setD("Fun",                funVal);
       setD("Pomodoros 🍅",       getM("Pomodoros 🍅"));
       setD("Time Logged (mins)", getM("Time Logged (mins)"));
-      setD("Date Added",         new Date());
+      setD("Date Added",         getM("Date Added") || new Date());
 
       dailyLog.appendRow(newRow);
 
