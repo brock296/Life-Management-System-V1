@@ -203,6 +203,11 @@ function parseDate(value) {
   return null;
 }
 
+function parseCheckboxValue(val) {
+  if (val === true || String(val).toUpperCase() === "TRUE" || val === "yes") return true;
+  return false;
+}
+
 function validateAndGetValue(value, columnName, dropdownOptions) {
   if (!value) return "";
   const str = String(value).trim();
@@ -433,11 +438,16 @@ function setupImportanceAndFunCheckboxes() {
       const idx = getOrCreateColumn(sheet, colName);
       const lastRow = sheet.getLastRow();
       if (lastRow > 1) {
-        sheet.getRange(2, idx + 1, lastRow - 1, 1).insertCheckboxes();
+        // Strict convert to real interactive checkboxes
+        const range = sheet.getRange(2, idx + 1, lastRow - 1, 1);
+        const vals = range.getValues();
+        const cleanVals = vals.map(function(r) { return [parseCheckboxValue(r[0])]; });
+        range.setValues(cleanVals);
+        range.insertCheckboxes();
       }
     });
   });
-  Logger.log("Importance & Fun checkboxes set.");
+  Logger.log("Importance & Fun checkboxes set and checked values normalized.");
 }
 
 function formatDateColumns(ss) {
@@ -1069,8 +1079,8 @@ function syncDailyLogToMaster(dailyLog, master, dCols, mCols) {
     const lifeArea   = getD("Life Area");
     const goalName   = getD("Goal Name");
     const project    = getD("Project");
-    const importance = getD("Importance");
-    const fun        = getD("Fun");
+    const importance = parseCheckboxValue(getD("Importance"));
+    const fun        = parseCheckboxValue(getD("Fun"));
     const pomodoros  = getD("Pomodoros 🍅");
     const timeLogged = getD("Time Logged (mins)");
 
@@ -1084,8 +1094,8 @@ function syncDailyLogToMaster(dailyLog, master, dCols, mCols) {
         { col: "Status",                 val: status },
         { col: "Due Date",               val: dueDate },
         { col: "Priority",               val: priority },
-        { col: "Importance",             val: importance === true || importance === "TRUE" },
-        { col: "Fun",                    val: fun === true || fun === "TRUE" },
+        { col: "Importance",             val: importance },
+        { col: "Fun",                    val: fun },
         { col: "Pomodoros 🍅",           val: pomodoros },
         { col: "Time Logged (mins)",     val: timeLogged }
       ];
@@ -1124,11 +1134,8 @@ function syncDailyLogToMaster(dailyLog, master, dCols, mCols) {
       setM("Goal Name",          goalName);
       setM("Project",            project);
 
-      const impVal = (importance === true || importance === "TRUE");
-      const funVal = (fun === true || fun === "TRUE");
-
-      setM("Importance",         impVal);
-      setM("Fun",                funVal);
+      setM("Importance",         importance);
+      setM("Fun",                fun);
       setM("Pomodoros 🍅",       pomodoros);
       setM("Time Logged (mins)", timeLogged);
       setM("Date Added",         new Date());
@@ -1140,7 +1147,7 @@ function syncDailyLogToMaster(dailyLog, master, dCols, mCols) {
       if (mCols["Fun"] !== undefined) master.getRange(appendedRowIdx, mCols["Fun"] + 1).insertCheckboxes();
 
       additions++;
-      masterMap.set(compoundKey, appendedRowIdx); // Prevent subsequent duplicates inside the same batch sync
+      masterMap.set(compoundKey, appendedRowIdx); // Prevent duplicates inside the same batch
     }
   });
   Logger.log(`[D->M] Done. Updates: ${updates}, Additions: ${additions}`);
@@ -1203,8 +1210,8 @@ function syncMasterToDailyLog(dailyLog, master, dCols, mCols, tz) {
       setD("Goal Name",          getM("Goal Name"));
       setD("Project",            getM("Project"));
 
-      const impVal = (getM("Importance") === true || getM("Importance") === "TRUE");
-      const funVal = (getM("Fun") === true || getM("Fun") === "TRUE");
+      const impVal = parseCheckboxValue(getM("Importance"));
+      const funVal = parseCheckboxValue(getM("Fun"));
 
       setD("Importance",         impVal);
       setD("Fun",                funVal);
@@ -1219,7 +1226,7 @@ function syncMasterToDailyLog(dailyLog, master, dCols, mCols, tz) {
       if (dCols["Fun"] !== undefined) dailyLog.getRange(appendedRowIdx, dCols["Fun"] + 1).insertCheckboxes();
 
       adds++;
-      dailyMap.set(compoundKey, appendedRowIdx); // Prevent subsequent duplicates inside the same batch sync
+      dailyMap.set(compoundKey, appendedRowIdx); // Prevent duplicates inside the same batch
       Logger.log("[M->D] Added: " + taskName + " with key: " + compoundKey);
     }
   });
