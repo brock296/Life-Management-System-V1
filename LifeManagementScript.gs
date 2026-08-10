@@ -298,6 +298,11 @@ function initialSetup() {
     addProgressBarsToGoals(ss);
     addQuickFiltersToGoals(ss);
     setupTriggers();
+
+    // Setup Date Picker Calendars on both sheets as requested
+    setupDueDateDatePicker(ss.getSheetByName(DAILY_LOG_SHEET_NAME));
+    setupDueDateDatePicker(ss.getSheetByName(MASTER_PROJECT_TRACKER_SHEET_NAME));
+
     syncAllSheets();
 
     ui.alert("Setup Complete", "All sheets configured. Quadrants and goals update live.", ui.ButtonSet.OK);
@@ -307,6 +312,26 @@ function initialSetup() {
   } finally {
     releaseLock();
   }
+}
+
+// ======================== DATE PICKER BUILDER ========================
+
+function setupDueDateDatePicker(sheet) {
+  if (!sheet) return;
+  const cols = getColumnMap(sheet);
+  const dueIdx = cols["Due Date"];
+  if (dueIdx === undefined) return;
+  const lastRow = sheet.getMaxRows();
+  if (lastRow > 1) {
+    const range = sheet.getRange(2, dueIdx + 1, lastRow - 1, 1);
+    const rule = SpreadsheetApp.newDataValidation()
+      .requireDate()
+      .setAllowInvalid(true)
+      .setHelpText("Double-click to open calendar date picker.")
+      .build();
+    range.setDataValidation(rule);
+  }
+  Logger.log("[DATE PICKER] Set up Calendar validation on " + sheet.getName());
 }
 
 // ======================== REPAIR ========================
@@ -323,7 +348,11 @@ function repairAndSync() {
       const sheet = ss.getSheetByName(sheetName);
       if (!sheet) return;
       const cols = getColumnMap(sheet);
-      ["Due Date", "Date Added"].forEach(function(colName) {
+
+      // Ensure Date Added / Added Date check is resolved
+      const dateAddedCol = cols["Added Date"] !== undefined ? "Added Date" : "Date Added";
+
+      ["Due Date", dateAddedCol].forEach(function(colName) {
         const idx = cols[colName];
         if (idx === undefined) return;
         const lastRow = sheet.getLastRow();
@@ -452,15 +481,20 @@ function setupImportanceAndFunCheckboxes() {
 
 function formatDateColumns(ss) {
   const targets = [
-    { name: DAILY_LOG_SHEET_NAME,               cols: ["Due Date", "Date Added"] },
-    { name: MASTER_PROJECT_TRACKER_SHEET_NAME,   cols: ["Due Date", "Date Added"] },
+    { name: DAILY_LOG_SHEET_NAME,               cols: ["Due Date"] },
+    { name: MASTER_PROJECT_TRACKER_SHEET_NAME,   cols: ["Due Date"] },
     { name: OVERDUE_LOG_SHEET_NAME,              cols: ["Original Due Date", "Date Logged"] }
   ];
   targets.forEach(function(t) {
     const sheet = ss.getSheetByName(t.name);
     if (!sheet) return;
     const colMap = getColumnMap(sheet);
-    t.cols.forEach(function(c) {
+
+    // Add Added Date check
+    const addedColName = colMap["Added Date"] !== undefined ? "Added Date" : "Date Added";
+    const fullCols = t.cols.concat([addedColName]);
+
+    fullCols.forEach(function(c) {
       const idx = colMap[c];
       if (idx !== undefined) sheet.getRange(2, idx + 1, sheet.getMaxRows() - 1, 1).setNumberFormat("yyyy-MM-dd");
     });
@@ -747,12 +781,14 @@ function onEdit(e) {
 
     Logger.log("[ONEDIT] " + sheetName + " R" + row + "C" + col + " = " + e.value);
 
-    // Automatically add today's date in 'Date Added' column of edited row for new tasks
+    // Automatically add today's date in 'Date Added' / 'Added Date' column of edited row for new tasks
     if (sheetName === DAILY_LOG_SHEET_NAME || sheetName === MASTER_PROJECT_TRACKER_SHEET_NAME) {
       const cols = getColumnMap(sheet);
+      const addedColName = cols["Added Date"] !== undefined ? "Added Date" : "Date Added";
+
       if (cols["Task"] !== undefined && col === cols["Task"] + 1) {
         const taskVal = sheet.getRange(row, col).getValue();
-        const dateAddedCol = cols["Date Added"];
+        const dateAddedCol = cols[addedColName];
         if (taskVal && dateAddedCol !== undefined) {
           const dateAddedCell = sheet.getRange(row, dateAddedCol + 1);
           if (!dateAddedCell.getValue()) {
@@ -1037,6 +1073,10 @@ function syncAllSheets() {
     const mCols = getColumnMap(master);
     const oCols = getColumnMap(overdueLog);
 
+    // Apply Calendar Date Pickers on sync as well
+    setupDueDateDatePicker(dailyLog);
+    setupDueDateDatePicker(master);
+
     syncDailyLogToMaster(dailyLog, master, dCols, mCols);
     syncMasterToDailyLog(dailyLog, master, dCols, mCols, ss.getSpreadsheetTimeZone());
     logOverdueTasks(dailyLog, overdueLog, dCols, oCols);
@@ -1062,17 +1102,16 @@ function syncDailyLogToMaster(dailyLog, master, dCols, mCols) {
   const dData = getSheetDataSafe(dailyLog);
   const mData = getSheetDataSafe(master);
 
-  // Multi-criteria duplicate check on Master Project Tracker: Task Name + Due Date + Goal Name + Project
-  const getCompoundKey = (name, dateVal, goal, proj) => {
-    const dStr = dateVal instanceof Date ? Utilities.formatDate(dateVal, "UTC", "yyyy-MM-dd") : String(dateVal || "").trim();
-    return `${String(name || "").trim()}|${dStr}|${String(goal || "").trim()}|${String(proj || "").trim()}`;
+  // Multi-criteria compound matching key (Task + Project + Goal Name) so dates are free to synchronize!
+  const getCompoundSyncKey = (name, proj, goal) => {
+    return `${String(name || "").trim()}|${String(proj || "").trim()}|${String(goal || "").trim()}`;
   };
 
   const masterMap = new Map();
   mData.forEach(function(row, i) {
     const name = String(row[mCols["Task"]] || "").trim();
     if (name) {
-      const key = getCompoundKey(name, row[mCols["Due Date"]], row[mCols["Goal Name"]], row[mCols["Project"]]);
+      const key = getCompoundSyncKey(name, row[mCols["Project"]], row[mCols["Goal Name"]]);
       masterMap.set(key, i + 2); // row index
     }
   });
@@ -1080,6 +1119,10 @@ function syncDailyLogToMaster(dailyLog, master, dCols, mCols) {
   let updates = 0;
   let additions = 0;
   const masterLastCol = master.getLastColumn();
+
+  // Handle support for "Added Date" or "Date Added" column dynamically
+  const dAddedColName = dCols["Added Date"] !== undefined ? "Added Date" : "Date Added";
+  const mAddedColName = mCols["Added Date"] !== undefined ? "Added Date" : "Date Added";
 
   dData.forEach(function(dRow, i) {
     const taskName = String(dRow[dCols["Task"]] || "").trim();
@@ -1098,7 +1141,7 @@ function syncDailyLogToMaster(dailyLog, master, dCols, mCols) {
     const pomodoros  = getD("Pomodoros 🍅");
     const timeLogged = getD("Time Logged (mins)");
 
-    const compoundKey = getCompoundKey(taskName, dueDate, goalName, project);
+    const compoundKey = getCompoundSyncKey(taskName, project, goalName);
 
     if (masterMap.has(compoundKey)) {
       const mRowNum = masterMap.get(compoundKey);
@@ -1119,8 +1162,14 @@ function syncDailyLogToMaster(dailyLog, master, dCols, mCols) {
         if (mIdx === undefined) return;
 
         let shouldUpdate = false;
-        if (f.col === "Due Date" && f.val instanceof Date && mRow[mIdx] instanceof Date) {
-          if (f.val.getTime() !== mRow[mIdx].getTime()) shouldUpdate = true;
+        if (f.col === "Due Date") {
+          const dDateObj = parseDate(f.val);
+          const mDateObj = parseDate(mRow[mIdx]);
+          if (dDateObj && mDateObj) {
+            if (dDateObj.getTime() !== mDateObj.getTime()) shouldUpdate = true;
+          } else if (!!dDateObj !== !!mDateObj) {
+            shouldUpdate = true;
+          }
         } else if (JSON.stringify(mRow[mIdx]) !== JSON.stringify(f.val)) {
           shouldUpdate = true;
         }
@@ -1152,7 +1201,9 @@ function syncDailyLogToMaster(dailyLog, master, dCols, mCols) {
       setM("Fun",                fun);
       setM("Pomodoros 🍅",       pomodoros);
       setM("Time Logged (mins)", timeLogged);
-      setM("Date Added",         getD("Date Added") || new Date());
+
+      const cleanAddedDate = getD(dAddedColName) || new Date();
+      if (mCols[mAddedColName] !== undefined) newRow[mCols[mAddedColName]] = cleanAddedDate;
 
       master.appendRow(newRow);
 
@@ -1177,23 +1228,27 @@ function syncMasterToDailyLog(dailyLog, master, dCols, mCols, tz) {
   const mData = getSheetDataSafe(master);
   const dData = getSheetDataSafe(dailyLog);
 
-  // Multi-criteria duplicate check on Daily Log: Task Name + Due Date + Goal Name + Project
-  const getCompoundKey = (name, dateVal, goal, proj) => {
-    const dStr = dateVal instanceof Date ? Utilities.formatDate(dateVal, "UTC", "yyyy-MM-dd") : String(dateVal || "").trim();
-    return `${String(name || "").trim()}|${dStr}|${String(goal || "").trim()}|${String(proj || "").trim()}`;
+  // Multi-criteria compound matching key (Task + Project + Goal Name) so dates are free to synchronize!
+  const getCompoundSyncKey = (name, proj, goal) => {
+    return `${String(name || "").trim()}|${String(proj || "").trim()}|${String(goal || "").trim()}`;
   };
 
   const dailyMap = new Map();
   dData.forEach(function(row, i) {
     const name = String(row[dCols["Task"]] || "").trim();
     if (name) {
-      const key = getCompoundKey(name, row[dCols["Due Date"]], row[dCols["Goal Name"]], row[dCols["Project"]]);
-      dailyMap.set(key, i + 2);
+      const key = getCompoundSyncKey(name, row[dCols["Project"]], row[dCols["Goal Name"]]);
+      dailyMap.set(key, i + 2); // row index
     }
   });
 
   let adds = 0;
+  let updates = 0;
   const dLastCol = dailyLog.getLastColumn();
+
+  // Dynamic added date support
+  const dAddedColName = dCols["Added Date"] !== undefined ? "Added Date" : "Date Added";
+  const mAddedColName = mCols["Added Date"] !== undefined ? "Added Date" : "Date Added";
 
   mData.forEach(function(mRow) {
     const taskName = String(mRow[mCols["Task"]] || "").trim();
@@ -1209,9 +1264,52 @@ function syncMasterToDailyLog(dailyLog, master, dCols, mCols, tz) {
     const isOverdue = dueDate < today;
     const isDueSoon = dueDate >= today && dueDate <= sevenDaysOut;
 
-    const compoundKey = getCompoundKey(taskName, dueDateRaw, mRow[mCols["Goal Name"]], mRow[mCols["Project"]]);
+    const compoundKey = getCompoundSyncKey(taskName, mRow[mCols["Project"]], mRow[mCols["Goal Name"]]);
 
-    if ((isOverdue || isDueSoon) && !dailyMap.has(compoundKey)) {
+    if (dailyMap.has(compoundKey)) {
+      // Two-way synchronization: If it already exists in Daily Log, keep everything updated (especially Due Date changes!)
+      const dRowNum = dailyMap.get(compoundKey);
+      const dRow = dailyLog.getRange(dRowNum, 1, 1, dLastCol).getValues()[0];
+
+      const fieldsToSync = [
+        { col: "Status",                 val: status },
+        { col: "Due Date",               val: dueDateRaw },
+        { col: "Priority",               val: mRow[mCols["Priority"]] },
+        { col: "Importance",             val: parseCheckboxValue(mRow[mCols["Importance"]]) },
+        { col: "Fun",                    val: parseCheckboxValue(mRow[mCols["Fun"]]) },
+        { col: "Pomodoros 🍅",           val: mRow[mCols["Pomodoros 🍅"]] },
+        { col: "Time Logged (mins)",     val: mRow[mCols["Time Logged (mins)"]] }
+      ];
+
+      fieldsToSync.forEach(function(f) {
+        const dIdx = dCols[f.col];
+        if (dIdx === undefined) return;
+
+        let shouldUpdate = false;
+        if (f.col === "Due Date") {
+          const dDateObj = parseDate(dRow[dIdx]);
+          const mDateObj = parseDate(f.val);
+          if (dDateObj && mDateObj) {
+            if (dDateObj.getTime() !== mDateObj.getTime()) shouldUpdate = true;
+          } else if (!!dDateObj !== !!mDateObj) {
+            shouldUpdate = true;
+          }
+        } else if (JSON.stringify(dRow[dIdx]) !== JSON.stringify(f.val)) {
+          shouldUpdate = true;
+        }
+
+        if (shouldUpdate) {
+          Logger.log(`[M->D] Syncing update for '${taskName}' with key '${compoundKey}', Col '${f.col}' to '${f.val}'`);
+          const targetCell = dailyLog.getRange(dRowNum, dIdx + 1);
+          targetCell.setValue(f.val);
+          if (f.col === "Importance" || f.col === "Fun") {
+            targetCell.insertCheckboxes();
+          }
+          updates++;
+        }
+      });
+    } else if (isOverdue || isDueSoon) {
+      // If it doesn't exist and matches timeframe criteria, append it to the Daily Log
       const newRow = new Array(dLastCol).fill("");
       function setD(col, val) { if (dCols[col] !== undefined) newRow[dCols[col]] = val; }
       function getM(col) { return mCols[col] !== undefined ? mRow[mCols[col]] : ""; }
@@ -1231,7 +1329,9 @@ function syncMasterToDailyLog(dailyLog, master, dCols, mCols, tz) {
       setD("Fun",                funVal);
       setD("Pomodoros 🍅",       getM("Pomodoros 🍅"));
       setD("Time Logged (mins)", getM("Time Logged (mins)"));
-      setD("Date Added",         getM("Date Added") || new Date());
+
+      const cleanAddedDate = getM(mAddedColName) || new Date();
+      if (dCols[dAddedColName] !== undefined) newRow[dCols[dAddedColName]] = cleanAddedDate;
 
       dailyLog.appendRow(newRow);
 
@@ -1244,7 +1344,7 @@ function syncMasterToDailyLog(dailyLog, master, dCols, mCols, tz) {
       Logger.log("[M->D] Added: " + taskName + " with key: " + compoundKey);
     }
   });
-  Logger.log("[M->D] Done. " + adds + " added.");
+  Logger.log("[M->D] Done. Adds: " + adds + ", Updates: " + updates);
 }
 
 // ======================== OVERDUE LOGIC ========================
@@ -1370,7 +1470,9 @@ function archiveCompletedTasksInternal(ss, dailyLog, master, dCols, mCols) {
     setA("Priority",    getD("Priority"));
     setA("Life Area",   getD("Life Area"));
     setA("Goal Name",   getD("Goal Name"));
-    setA("Date Added",  getD("Date Added"));
+
+    const dAddedColName = dCols["Added Date"] !== undefined ? "Added Date" : "Date Added";
+    setA("Date Added",  getD(dAddedColName));
     setA("Archived On", new Date());
     archiveSheet.appendRow(newRow);
     rowsToDelete.push(i + 2);
